@@ -1,0 +1,93 @@
+#!/usr/bin/env python
+
+# ================================================================================
+# =                                  CVESEARCH                                   =
+# ================================================================================
+
+# Queries the GitHub repositories API for provided CVEs and lists them in order of repositories returned
+# This script is useful when combined with exploit suggestors
+
+# An example workflow might be:
+# wes systeminfo.txt -i "Elevation of Privilege" --exploits-only -o exploits.txt
+# tail -n +2 exploits.txt | awk -F ',' '{print $2}' | tr -d '"' > cves.txt
+# cvesearch cves.txt > ordered_cves.txt
+
+import argparse
+import time
+
+import requests
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file", help="Path to file with CVE IDs")
+    args = parser.parse_args()
+
+    return args
+
+
+def read_file(file: str) -> list[str]:
+    with open(file) as f:
+        cves = [cve.strip() for cve in f]
+
+    # Deduplicate
+    return list(set(cves))
+
+
+def get_search_stats(data: dict) -> tuple[int, int | None]:
+    total_count = data["total_count"]
+
+    try:
+        # Previously sorted by stars desc from the api
+        highest_stars = data["items"][0]["stargazers_count"]
+    except IndexError:
+        highest_stars = None
+
+    return (total_count, highest_stars)
+
+
+def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
+    aggregated = []
+
+    for cve in cves:
+        response = requests.get(
+            url=f"https://api.github.com/search/repositories?q={cve}&sort=stars"
+        )
+
+        data = response.json()
+
+        search_stats = get_search_stats(data)
+
+        aggregated.append(
+            {
+                "CVE": cve,
+                "total_count": search_stats[0],
+                "highest_stars": search_stats[1],
+            }
+        )
+
+        time.sleep(0.25)
+
+    # Sort by total_count desc
+    aggregated.sort(key=lambda cve: cve["total_count"] or 0, reverse=True)
+
+    return aggregated
+
+
+def print_results(aggregated: list[dict[str, str | int | None]]) -> None:
+    for search in aggregated:
+        print(search["CVE"])
+        print(f"  Total count: {search['total_count']}")
+        print(f"  Highest stars: {search['highest_stars']}")
+        print()
+
+
+def main():
+    args = parse_args()
+    cves = read_file(args.file)
+    aggregated = query_api(cves)
+    print_results(aggregated)
+
+
+if __name__ == "__main__":
+    main()
