@@ -4,10 +4,9 @@
 # =                                  CVESEARCH                                   =
 # ================================================================================
 
-# Queries the GitHub repositories API for provided CVEs and lists them in order of repositories returned
+# Queries NVD vulnerabilitity and GitHub repository APIs for provided CVEs
+# Pulls data and heuristically ranks CVEs by popularity while displaying CVE scores
 # This script is useful when combined with exploit suggestors
-# For faster queries, grab a personal access token here https://github.com/settings/tokens
-# and set it as an environment variable of GITHUB_TOKEN
 
 # An example workflow might be:
 # wes systeminfo.txt -i "Elevation of Privilege" --exploits-only -o exploits.txt
@@ -16,7 +15,6 @@
 
 import argparse
 import os
-import sys
 import time
 
 import requests
@@ -38,7 +36,54 @@ def read_file(file: str) -> list[str]:
     return list(set(cves))
 
 
-def get_search_stats(data: dict) -> tuple[int, int | None]:
+def query_nvd_api(cve: str) -> dict[str, float | None]:
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+    response = requests.get(
+        url=f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveIds={cve}",
+        headers=headers,
+    )
+
+    data = response.json()
+
+    if "totalResults" not in data:
+        message = data.get("message", "Unknown error")
+        raise RuntimeError(f"NVD API error: {message}")
+
+    if data["totalResults"] < 1:
+        return {
+            "base_score": None,
+            "exploitability_score": None,
+            "impact_score": None,
+        }
+
+    base_score = data["vulnerabilities"][0]["cve"]["metrics"]["cvssMetricV2"][0][
+        "cvssData"
+    ]["baseScore"]
+    exploitability_score = data["vulnerabilities"][0]["cve"]["metrics"]["cvssMetricV2"][
+        0
+    ]["exploitabilityScore"]
+    impact_score = data["vulnerabilities"][0]["cve"]["metrics"]["cvssMetricV2"][0][
+        "impactScore"
+    ]
+
+    return {
+        "base_score": base_score,
+        "exploitability_score": exploitability_score,
+        "impact_score": impact_score,
+    }
+
+
+def query_github_api(cve: str) -> dict[str, int | None]:
+    headers = {"Accept": "application/vnd.github+json"}
+    response = requests.get(
+        url=f"https://api.github.com/search/repositories?q={cve}&sort=stars",
+        headers=headers,
+    )
+
+    data = response.json()
+
     if "total_count" not in data:
         message = data.get("message", "Unknown error")
         raise RuntimeError(f"GitHub API error: {message}")
@@ -51,45 +96,31 @@ def get_search_stats(data: dict) -> tuple[int, int | None]:
     except IndexError:
         highest_stars = None
 
-    return (repositories, highest_stars)
+    return {
+        "repositories": repositories,
+        "highest_stars": highest_stars,
+    }
 
 
-def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
+def query(cves: list[str]) -> list[dict[str, str | int | None]]:
     aggregated = []
-    headers = {"Accept": "application/vnd.github+json"}
-    rate = 6
-
-    token = os.environ.get("GITHUB_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-        rate = 2
-
-    total_cves = len(cves)
-    print(
-        f"{total_cves} CVEs loaded. Approximate query time: {total_cves * rate} seconds",
-        file=sys.stderr,
-    )
-    print(file=sys.stderr)
 
     for cve in cves:
-        response = requests.get(
-            url=f"https://api.github.com/search/repositories?q={cve}&sort=stars",
-            headers=headers,
-        )
-
-        data = response.json()
-
-        search_stats = get_search_stats(data)
+        nvd_data = query_nvd_api(cve)
+        github_data = query_github_api(cve)
 
         aggregated.append(
             {
                 "CVE": cve,
-                "repositories": search_stats[0],
-                "highest_stars": search_stats[1],
+                "base_score": nvd_data["base_score"],
+                "exploitability_score": nvd_data["exploitability_score"],
+                "impact_score": nvd_data["impact_score"],
+                "repositories": github_data["repositories"],
+                "highest_stars": github_data["highest_stars"],
             }
         )
 
-        time.sleep(rate)
+        time.sleep(6)
 
     # Sort by total_count desc
     aggregated.sort(key=lambda cve: cve["repositories"] or 0, reverse=True)
@@ -98,17 +129,20 @@ def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
 
 
 def print_results(aggregated: list[dict[str, str | int | None]]) -> None:
-    for search in aggregated:
-        print(search["CVE"])
-        print(f"  Repositories: {search['repositories']}")
-        print(f"  Highest stars: {search['highest_stars']}")
+    for cve in aggregated:
+        print(cve["CVE"])
+        print(f"  Repositories: {cve['repositories']}")
+        print(f"  Highest stars: {cve['highest_stars']}")
+        print(f"  Base Score: {cve['base_score']}")
+        print(f"  Exploitability score: {cve['exploitability_score']}")
+        print(f"  Impact score: {cve['impact_score']}")
         print()
 
 
 def main():
     args = parse_args()
     cves = read_file(args.file)
-    aggregated = query_api(cves)
+    aggregated = query(cves)
     print_results(aggregated)
 
 
