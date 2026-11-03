@@ -14,6 +14,7 @@
 # cvesearch cves.txt > ordered_cves.txt
 
 import argparse
+import re
 import time
 
 import requests
@@ -27,90 +28,104 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def read_file(file: str) -> list[str]:
+def read_file(file: str) -> list:
     with open(file) as f:
-        cves = [cve.strip() for cve in f]
+        cves = {cve.strip() for cve in f}  # Deduplicate
 
-    # Deduplicate
-    return list(set(cves))
+    return list(cves)
 
 
-def query_nvd_api(cve: str) -> dict[str, float | None]:
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
+def query_nvd_api(query: str) -> dict:
     response = requests.get(
-        url=f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveIds={cve}",
-        headers=headers,
+        url="https://services.nvd.nist.gov/rest/json/cves/2.0",
+        params={"cveId": query},
+        headers={"Accept": "application/json"},
+        timeout=30,
     )
+    response.raise_for_status()
 
     data = response.json()
 
-    if "totalResults" not in data:
-        message = data.get("message", "Unknown error")
-        raise RuntimeError(f"NVD API error: {message}")
+    if "message" in data:
+        raise RuntimeError(f"NVD API error: {data['message']}")
+
+    result: dict[str, str | float | None] = {
+        "security_bulletin": None,
+        "base_score": None,
+        "exploitability_score": None,
+        "impact_score": None,
+    }
 
     if data["totalResults"] < 1:
-        return {
-            "base_score": None,
-            "exploitability_score": None,
-            "impact_score": None,
-        }
+        return result
 
-    base_score = data["vulnerabilities"][0]["cve"]["metrics"]["cvssMetricV2"][0][
-        "cvssData"
-    ]["baseScore"]
-    exploitability_score = data["vulnerabilities"][0]["cve"]["metrics"]["cvssMetricV2"][
-        0
-    ]["exploitabilityScore"]
-    impact_score = data["vulnerabilities"][0]["cve"]["metrics"]["cvssMetricV2"][0][
-        "impactScore"
-    ]
+    vulnerability = data["vulnerabilities"][0]["cve"]
 
-    return {
-        "base_score": base_score,
-        "exploitability_score": exploitability_score,
-        "impact_score": impact_score,
-    }
+    regex = re.compile(r"ms\d{2}-\d{3}", re.IGNORECASE)
+    for reference in vulnerability.get("references", []):
+        if reference.get("source") != "secure@microsoft.com":
+            continue
+        match = regex.search(reference.get("url", ""))
+        if match is not None:
+            result["security_bulletin"] = match.group().upper()
+
+    # Prefer newer CVSS versions, fall back to older ones
+    metrics = vulnerability.get("metrics", {})
+    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for source in metrics.get(key, []):
+            if (
+                source.get("source") == "nvd@nist.gov"
+                and source.get("type") == "Primary"
+            ):
+                result["base_score"] = source["cvssData"]["baseScore"]
+                result["exploitability_score"] = source.get("exploitabilityScore")
+                result["impact_score"] = source.get("impactScore")
+                return result
+
+    return result
 
 
-def query_github_api(cve: str) -> dict[str, int | None]:
-    headers = {"Accept": "application/vnd.github+json"}
+def query_github_api(*terms: str | None) -> dict:
+    cleaned = [term for term in terms if term]
+
+    query = " OR ".join(cleaned)
     response = requests.get(
-        url=f"https://api.github.com/search/repositories?q={cve}&sort=stars",
-        headers=headers,
+        url="https://api.github.com/search/repositories",
+        params={"q": query, "sort": "stars"},
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=30,
     )
+    response.raise_for_status()
 
     data = response.json()
 
-    if "total_count" not in data:
-        message = data.get("message", "Unknown error")
-        raise RuntimeError(f"GitHub API error: {message}")
+    if "message" in data:
+        raise RuntimeError(f"GitHub API error: {data['message']}")
 
-    repositories = data["total_count"]
-
-    try:
-        # Previously sorted by stars desc from the api
-        highest_stars = data["items"][0]["stargazers_count"]
-    except IndexError:
-        highest_stars = None
-
+    items = data["items"]
     return {
-        "repositories": repositories,
-        "highest_stars": highest_stars,
+        "repositories": data["total_count"],
+        "highest_stars": items[0]["stargazers_count"] if items else None,
     }
 
 
-def query(cves: list[str]) -> list[dict[str, str | int | None]]:
+def query(cves: list) -> list:
     aggregated = []
 
     for cve in cves:
         nvd_data = query_nvd_api(cve)
-        github_data = query_github_api(cve)
+
+        if nvd_data["base_score"] is None:
+            continue
+
+        security_bulletin = nvd_data["security_bulletin"]
+
+        github_data = query_github_api(cve, security_bulletin)
 
         aggregated.append(
             {
                 "CVE": cve,
+                "security_bulletin": security_bulletin,
                 "base_score": nvd_data["base_score"],
                 "exploitability_score": nvd_data["exploitability_score"],
                 "impact_score": nvd_data["impact_score"],
@@ -119,6 +134,7 @@ def query(cves: list[str]) -> list[dict[str, str | int | None]]:
             }
         )
 
+        # Both APIs limit unauthenticated users to 10 requests/min
         time.sleep(6)
 
     # Sort by total_count desc
@@ -127,14 +143,18 @@ def query(cves: list[str]) -> list[dict[str, str | int | None]]:
     return aggregated
 
 
-def print_results(aggregated: list[dict[str, str | int | None]]) -> None:
-    for cve in aggregated:
-        print(cve["CVE"])
-        print(f"  Repositories: {cve['repositories']}")
-        print(f"  Highest stars: {cve['highest_stars']}")
-        print(f"  Base Score: {cve['base_score']}")
-        print(f"  Exploitability score: {cve['exploitability_score']}")
-        print(f"  Impact score: {cve['impact_score']}")
+def print_results(aggregated: list) -> None:
+    for vulnerability in aggregated:
+        header = vulnerability["CVE"]
+        if vulnerability["security_bulletin"]:
+            header += f" / {vulnerability['security_bulletin']}"
+
+        print(header)
+        print(f"  Repositories: {vulnerability['repositories']}")
+        print(f"  Highest stars: {vulnerability['highest_stars']}")
+        print(f"  Base Score: {vulnerability['base_score']}")
+        print(f"  Exploitability score: {vulnerability['exploitability_score']}")
+        print(f"  Impact score: {vulnerability['impact_score']}")
         print()
 
 
