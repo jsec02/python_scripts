@@ -6,6 +6,8 @@
 
 # Queries the GitHub repositories API for provided CVEs and lists them in order of repositories returned
 # This script is useful when combined with exploit suggestors
+# For faster queries, grab a personal access token here https://github.com/settings/tokens
+# and set it as an environment variable of GITHUB_TOKEN
 
 # An example workflow might be:
 # wes systeminfo.txt -i "Elevation of Privilege" --exploits-only -o exploits.txt
@@ -13,6 +15,7 @@
 # cvesearch cves.txt > ordered_cves.txt
 
 import argparse
+import os
 import time
 
 import requests
@@ -35,6 +38,10 @@ def read_file(file: str) -> list[str]:
 
 
 def get_search_stats(data: dict) -> tuple[int, int | None]:
+    if "total_count" not in data:
+        message = data.get("message", "Unknown error")
+        raise RuntimeError(f"GitHub API error: {message}")
+
     total_count = data["total_count"]
 
     try:
@@ -49,9 +56,20 @@ def get_search_stats(data: dict) -> tuple[int, int | None]:
 def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
     aggregated = []
 
+    headers = {"Accept": "application/vnd.github+json"}
+
+    token = os.environ.get("GITHUB_TOKEN")
+
+    rate = 6
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        rate = 2
+
     for cve in cves:
         response = requests.get(
-            url=f"https://api.github.com/search/repositories?q={cve}&sort=stars"
+            url=f"https://api.github.com/search/repositories?q={cve}&sort=stars",
+            headers=headers,
         )
 
         data = response.json()
@@ -66,7 +84,7 @@ def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
             }
         )
 
-        time.sleep(0.25)
+        time.sleep(rate)
 
     # Sort by total_count desc
     aggregated.sort(key=lambda cve: cve["total_count"] or 0, reverse=True)
