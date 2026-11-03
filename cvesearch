@@ -16,6 +16,7 @@
 
 import argparse
 import os
+import sys
 import time
 
 import requests
@@ -42,7 +43,7 @@ def get_search_stats(data: dict) -> tuple[int, int | None]:
         message = data.get("message", "Unknown error")
         raise RuntimeError(f"GitHub API error: {message}")
 
-    total_count = data["total_count"]
+    repositories = data["total_count"]
 
     try:
         # Previously sorted by stars desc from the api
@@ -50,7 +51,7 @@ def get_search_stats(data: dict) -> tuple[int, int | None]:
     except IndexError:
         highest_stars = None
 
-    return (total_count, highest_stars)
+    return (repositories, highest_stars)
 
 
 def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
@@ -65,9 +66,10 @@ def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
 
     total_cves = len(cves)
     print(
-        f"{total_cves} CVEs loaded. Approximate query time: {total_cves * rate} seconds"
+        f"{total_cves} CVEs loaded. Approximate query time: {total_cves * rate} seconds",
+        file=sys.stderr,
     )
-    print()
+    print(file=sys.stderr)
 
     for cve in cves:
         response = requests.get(
@@ -82,7 +84,7 @@ def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
         aggregated.append(
             {
                 "CVE": cve,
-                "total_count": search_stats[0],
+                "repositories": search_stats[0],
                 "highest_stars": search_stats[1],
             }
         )
@@ -90,7 +92,7 @@ def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
         time.sleep(rate)
 
     # Sort by total_count desc
-    aggregated.sort(key=lambda cve: cve["total_count"] or 0, reverse=True)
+    aggregated.sort(key=lambda cve: cve["repositories"] or 0, reverse=True)
 
     return aggregated
 
@@ -98,7 +100,7 @@ def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
 def print_results(aggregated: list[dict[str, str | int | None]]) -> None:
     for search in aggregated:
         print(search["CVE"])
-        print(f"  Total count: {search['total_count']}")
+        print(f"  Repositories: {search['repositories']}")
         print(f"  Highest stars: {search['highest_stars']}")
         print()
 
