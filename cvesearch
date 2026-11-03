@@ -55,16 +55,19 @@ def get_search_stats(data: dict) -> tuple[int, int | None]:
 
 def query_api(cves: list[str]) -> list[dict[str, str | int | None]]:
     aggregated = []
-
     headers = {"Accept": "application/vnd.github+json"}
-
-    token = os.environ.get("GITHUB_TOKEN")
-
     rate = 6
 
+    token = os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
         rate = 2
+
+    total_cves = len(cves)
+    print(
+        f"{total_cves} CVEs loaded. Approximate query time: {total_cves * rate} seconds"
+    )
+    print()
 
     for cve in cves:
         response = requests.get(
