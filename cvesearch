@@ -14,7 +14,6 @@
 # cvesearch cves.txt > ordered_cves.txt
 
 import argparse
-import os
 import time
 
 import requests
